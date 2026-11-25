@@ -12,7 +12,11 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 PRIMARY_DATASET = ROOT_DIR / "combined_flacourtia_dataset.jsonl"
 FALLBACK_DATASET = ROOT_DIR / "flacourtia_montana_dataset.jsonl"
 
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "qwen/qwen3.6-27b")
+GROQ_MODELS = [
+    os.environ.get("GROQ_MODEL", "qwen/qwen3.6-27b"),
+    "openai/gpt-oss-20b",
+    "llama-3.3-70b-versatile",
+]
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 TOP_K = 5
 
@@ -89,12 +93,18 @@ def post_json(url: str, payload: dict, headers: dict) -> dict:
 
 
 def call_groq(messages: list[dict], api_key: str) -> str:
-    data = post_json(
-        "https://api.groq.com/openai/v1/chat/completions",
-        {"model": GROQ_MODEL, "messages": messages, "temperature": 0.2},
-        {"Authorization": f"Bearer {api_key}"},
-    )
-    return data["choices"][0]["message"]["content"].strip()
+    last_err = None
+    for model in GROQ_MODELS:
+        try:
+            data = post_json(
+                "https://api.groq.com/openai/v1/chat/completions",
+                {"model": model, "messages": messages, "temperature": 0.2},
+                {"Authorization": f"Bearer {api_key}"},
+            )
+            return data["choices"][0]["message"]["content"].strip()
+        except Exception as exc:
+            last_err = exc
+    raise RuntimeError(f"Groq error: {last_err}")
 
 
 def call_gemini(prompt: str, system_prompt: str, api_key: str) -> str:
@@ -138,6 +148,15 @@ def build_credits(passages: list[dict]) -> list[dict]:
 
 
 def answer_question(question: str, language: str) -> dict:
+    greetings = {"hi", "hello", "hey", "namaste", "namaskara", "नमस्ते", "ನಮಸ್ಕಾರ", "help"}
+    if question.strip().lower().rstrip("!.,?") in greetings:
+        welcome = {
+            "English": "Namaskara! Ask me anything about Flacourtia montana (Mountain Sweet Thorn), its medicinal uses, or our 10-week conservation project at SIT Tumakuru.",
+            "Hindi": "नमस्कार! आप मुझसे Flacourtia montana, इसके उपयोगों या हमारे 10-सप्ताह के संरक्षण प्रोजेक्ट के बारे में कुछ भी पूछ सकते हैं।",
+            "Kannada": "ನಮಸ್ಕಾರ! Flacourtia montana ಮರ, ಅದರ ಉಪಯೋಗಗಳು ಅಥವಾ ನಮ್ಮ 10 ವಾರಗಳ ಸಂರಕ್ಷಣಾ ಯೋಜನೆಯ ಬಗ್ಗೆ ಏನನ್ನಾದರೂ ಕೇಳಿ.",
+        }
+        return {"answer": welcome.get(language, welcome["English"]), "credits": []}
+
     groq_key = os.environ.get("GROQ_API_KEY", "").strip()
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
 
@@ -150,7 +169,12 @@ def answer_question(question: str, language: str) -> dict:
 
     matches = bm25_search(search_query, top_k=TOP_K)
     if not matches:
-        return {"answer": "No matching information found in the dataset.", "credits": []}
+        no_match = {
+            "English": "I couldn't find an exact match in our dataset. Try asking about Flacourtia montana's uses, identification, habitat, or our 10-week SIT Tumakuru project!",
+            "Hindi": "मुझे डेटासेट में इससे जुड़ी सटीक जानकारी नहीं मिली। कृपया Flacourtia montana के उपयोग, पहचान या हमारे 10-सप्ताह के प्रोजेक्ट के बारे में पूछें।",
+            "Kannada": "ನಮ್ಮ ಡೇಟಾಸೆಟ್‌ನಲ್ಲಿ ಇದಕ್ಕೆ ನಿಖರವಾದ ಮಾಹಿತಿ ಸಿಗಲಿಲ್ಲ. ದಯವಿಟ್ಟು Flacourtia montana ಮರದ ಗುಣಲಕ್ಷಣಗಳು, ಉಪಯೋಗಗಳು ಅಥವಾ ನಮ್ಮ 10 ವಾರಗಳ ಯೋಜನೆಯ ಬಗ್ಗೆ ಕೇಳಿ.",
+        }
+        return {"answer": no_match.get(language, no_match["English"]), "credits": []}
 
     credits = build_credits(matches)
     context_blocks = [
@@ -163,6 +187,7 @@ def answer_question(question: str, language: str) -> dict:
         + f"\n\nTarget Reply Language: {language}\nUser Question: {question}"
     )
 
+    errors = []
     if groq_key:
         try:
             ans = call_groq(
@@ -173,22 +198,19 @@ def answer_question(question: str, language: str) -> dict:
                 groq_key,
             )
             return {"answer": ans, "credits": credits}
-        except Exception:
-            pass
+        except Exception as exc:
+            errors.append(str(exc))
 
     if gemini_key:
         try:
             ans = call_gemini(user_prompt, SYSTEM_PROMPT, gemini_key)
             return {"answer": ans, "credits": credits}
-        except Exception:
-            pass
+        except Exception as exc:
+            errors.append(f"Gemini error: {exc}")
 
-    # Offline retrieval fallback if no API key is configured
     snippets = "\n\n".join(f"• {m.get('text', '')[:320]}..." for m in matches[:3])
-    return {
-        "answer": f"(Running in retrieval mode — add GROQ_API_KEY or GEMINI_API_KEY in Vercel for full AI replies)\n\n{snippets}",
-        "credits": credits,
-    }
+    reason = " | ".join(errors) if errors else "Add GROQ_API_KEY or GEMINI_API_KEY in Vercel Environment Variables"
+    return {"answer": f"(Retrieval mode — {reason})\n\n{snippets}", "credits": credits}
 
 
 class handler(BaseHTTPRequestHandler):
