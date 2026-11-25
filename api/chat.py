@@ -18,7 +18,7 @@ GROQ_MODELS = [
     "llama-3.3-70b-versatile",
 ]
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
-TOP_K = 5
+TOP_K = 8
 
 SYSTEM_PROMPT = (
     "You are a helpful community assistant for the 'Conservation of Flacourtia montana' "
@@ -37,10 +37,6 @@ def tokenize(text: str) -> list[str]:
     return re.findall(r"\w+", text.lower())
 
 
-def has_non_latin(text: str) -> bool:
-    return any(ord(ch) > 127 for ch in text)
-
-
 def load_records() -> list[dict]:
     path = PRIMARY_DATASET if PRIMARY_DATASET.exists() else FALLBACK_DATASET
     if not path.exists():
@@ -50,7 +46,7 @@ def load_records() -> list[dict]:
 
 
 RECORDS = load_records()
-DOCS = [tokenize(f"{r.get('topic', '')} {r.get('text', '')}") for r in RECORDS]
+DOCS = [tokenize(f"{r.get('topic', '')} {r.get('title', '')} {r.get('text', '')}") for r in RECORDS]
 DOC_FREQS: Counter[str] = Counter()
 for _doc in DOCS:
     for _term in set(_doc):
@@ -79,6 +75,9 @@ def bm25_search(query: str, top_k: int = TOP_K) -> list[dict]:
             denom = freq + 1.5 * (1 - 0.75 + 0.75 * (doc_len / AVG_DL))
             score += idf * (freq * 2.5) / denom
         if score > 0:
+            rec_id = str(RECORDS[idx].get("id", ""))
+            if RECORDS[idx].get("origin") == "curated" or rec_id.startswith(("proj_", "bot_")):
+                score *= 3.5
             scores.append((score, idx))
     scores.sort(reverse=True)
     return [RECORDS[idx] for _, idx in scores[:top_k]]
@@ -143,7 +142,13 @@ def build_credits(passages: list[dict]) -> list[dict]:
     credits = []
     for p in passages:
         meta = p.get("metadata", {})
-        title = p.get("source_title") or meta.get("source_title") or p.get("topic") or "Source"
+        title = (
+            p.get("source_title")
+            or meta.get("source_title")
+            or p.get("title")
+            or p.get("topic")
+            or "Botanical / Project Source"
+        )
         url = p.get("source_url") or meta.get("source_url") or ""
         if (title, url) not in seen:
             seen.add((title, url))
@@ -172,6 +177,19 @@ def answer_question(question: str, language: str) -> dict:
             search_query = question
 
     matches = bm25_search(search_query, top_k=TOP_K)
+
+    q_toks = set(tokenize(search_query)) | set(tokenize(question))
+    pinned_ids = set()
+    if q_toks & {"project", "team", "member", "members", "student", "students", "participant", "participants", "participents", "who", "name", "names", "guide", "college", "sit", "where"}:
+        pinned_ids.update({"proj_001", "proj_004"})
+    if q_toks & {"medicinal", "medicine", "ayurveda", "use", "uses", "fruit", "fruits", "food", "eat", "edible", "nutrition"}:
+        pinned_ids.add("bot_005")
+    if q_toks & {"identify", "identification", "leaf", "leaves", "thorn", "thorns", "bark", "flower", "flowers", "height", "tree"}:
+        pinned_ids.update({"bot_002", "bot_003"})
+    if pinned_ids:
+        pinned_recs = [r for r in RECORDS if r.get("id") in pinned_ids and r not in matches]
+        matches = (pinned_recs + matches)[:TOP_K]
+
     if not matches:
         no_match = {
             "English": "I couldn't find an exact match in our dataset. Try asking about Flacourtia montana's uses, identification, habitat, or our 10-week SIT Tumakuru project!",
@@ -182,7 +200,7 @@ def answer_question(question: str, language: str) -> dict:
 
     credits = build_credits(matches)
     context_blocks = [
-        f"[{i}] {p.get('topic', 'N/A')} ({p.get('source_title', '')}):\n{p.get('text', '')}"
+        f"[{i}] {p.get('topic') or p.get('title') or 'N/A'} ({p.get('source_title') or p.get('title') or ''}):\n{p.get('text', '')}"
         for i, p in enumerate(matches, start=1)
     ]
     user_prompt = (
@@ -201,6 +219,7 @@ def answer_question(question: str, language: str) -> dict:
                 ],
                 groq_key,
             )
+            ans = re.sub(r"\*{1,2}([^*\n]+)\*{1,2}", r"\1", ans)
             return {"answer": ans, "credits": credits}
         except Exception as exc:
             errors.append(str(exc))
@@ -208,6 +227,7 @@ def answer_question(question: str, language: str) -> dict:
     if gemini_key:
         try:
             ans = call_gemini(user_prompt, SYSTEM_PROMPT, gemini_key)
+            ans = re.sub(r"\*{1,2}([^*\n]+)\*{1,2}", r"\1", ans)
             return {"answer": ans, "credits": credits}
         except Exception as exc:
             errors.append(f"Gemini error: {exc}")
