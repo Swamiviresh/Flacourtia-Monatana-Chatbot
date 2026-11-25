@@ -126,8 +126,9 @@ def call_gemini(prompt: str, system_prompt: str, api_key: str) -> str:
 
 def translate_to_english_keywords(question: str, groq_key: str, gemini_key: str) -> str:
     prompt = (
-        "Translate this question into concise English search keywords "
-        "(keep scientific names like Flacourtia montana). Return only keywords:\n\n"
+        "Fix any spelling typos, translate to English if needed, and output 5-10 concise "
+        "search keywords/synonyms to match a Flacourtia montana conservation project dataset "
+        "(e.g. for 'participents' include 'team members students names'). Return only keywords:\n\n"
         + question
     )
     if groq_key:
@@ -164,7 +165,7 @@ def answer_question(question: str, language: str) -> dict:
     gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
 
     search_query = question
-    if has_non_latin(question) and (groq_key or gemini_key):
+    if groq_key or gemini_key:
         try:
             search_query = translate_to_english_keywords(question, groq_key, gemini_key)
         except Exception:
