@@ -435,7 +435,10 @@
       }
     };
 
+    const STORAGE_KEY = "flacourtia_chat_history";
+    const LANG_KEY = "flacourtia_chat_lang";
     let currentLang = "English";
+    let chatHistory = [];
     const heroEl = document.getElementById("hero");
     const chatBox = document.getElementById("chatBox");
     const cardsGrid = document.getElementById("cardsGrid");
@@ -443,7 +446,9 @@
     const sendBtn = document.getElementById("sendBtn");
 
     function setLanguage(lang) {
+      if (!UI_TEXT[lang]) lang = "English";
       currentLang = lang;
+      localStorage.setItem(LANG_KEY, lang);
       const t = UI_TEXT[lang];
       document.querySelectorAll(".lang-btn").forEach(btn => {
         btn.classList.toggle("active", btn.dataset.lang === lang);
@@ -471,7 +476,7 @@
       });
     }
 
-    function appendMessage(role, text, credits = []) {
+    function appendMessage(role, text, credits = [], save = true) {
       heroEl.classList.add("hidden");
       chatBox.classList.add("active");
 
@@ -504,6 +509,10 @@
 
       chatBox.appendChild(div);
       chatBox.scrollTop = chatBox.scrollHeight;
+      if (save) {
+        chatHistory.push({ role, text, credits });
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(chatHistory));
+      }
       return div;
     }
 
@@ -513,7 +522,7 @@
       appendMessage("user", q);
       questionInput.value = "";
       sendBtn.disabled = true;
-      const loadingDiv = appendMessage("bot", "Thinking...");
+      const loadingDiv = appendMessage("bot", "Thinking...", [], false);
 
       try {
         const res = await fetch("/api/chat", {
@@ -526,7 +535,7 @@
         appendMessage("bot", data.answer || data.error || "No response.", data.credits || []);
       } catch (err) {
         loadingDiv.remove();
-        appendMessage("bot", "Network error: could not reach /api/chat.");
+        appendMessage("bot", "Network error: could not reach /api/chat.", [], false);
       } finally {
         sendBtn.disabled = false;
         questionInput.focus();
@@ -543,12 +552,21 @@
     });
 
     document.getElementById("resetChat").addEventListener("click", () => {
+      chatHistory = [];
+      localStorage.removeItem(STORAGE_KEY);
       chatBox.innerHTML = "";
       chatBox.classList.remove("active");
       heroEl.classList.remove("hidden");
     });
 
-    setLanguage("English");
+    setLanguage(localStorage.getItem(LANG_KEY) || "English");
+    try {
+      const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || "[]");
+      if (Array.isArray(saved) && saved.length > 0) {
+        chatHistory = saved;
+        saved.forEach(m => appendMessage(m.role, m.text, m.credits || [], false));
+      }
+    } catch (e) { localStorage.removeItem(STORAGE_KEY); }
   </script>
 </body>
 </html>
